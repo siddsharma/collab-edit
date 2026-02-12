@@ -1,11 +1,10 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
-import { auth } from "../firebaseConfig";
-import { signOut } from "firebase/auth";
 import axios from "axios";
+import { Header } from "./Header";
 import "../styles/NoteList.css";
 
-export function NoteList() {
+export function NoteList({ user }) {
   const [notes, setNotes] = useState([]);
   const [newTitle, setNewTitle] = useState("");
   const [loading, setLoading] = useState(true);
@@ -43,56 +42,68 @@ export function NoteList() {
     }
   };
 
-  const handleSignOut = async () => {
+  const handleDeleteNote = async (e, noteId) => {
+    e.stopPropagation();
+    
+    if (!window.confirm("Are you sure you want to delete this note?")) {
+      return;
+    }
+
     try {
-      await signOut(auth);
-      navigate("/");
+      await axios.delete(`${API_URL}/notes/${noteId}`);
+      setNotes(notes.filter((note) => note.id !== noteId));
     } catch (error) {
-      console.error("Sign out error:", error);
+      console.error("Error deleting note:", error);
     }
   };
 
   if (loading) return <div className="notes-container"><p>Loading...</p></div>;
 
   return (
-    <div className="notes-container">
-      <div className="header">
-        <h1>My Notes</h1>
-        <button onClick={handleSignOut} className="signout-btn">
-          Sign Out
-        </button>
-      </div>
+    <div className="notes-page">
+      <Header user={user} />
+      
+      <div className="notes-container">
+        <form onSubmit={handleCreateNote} className="create-note-form">
+          <input
+            type="text"
+            placeholder="New note title..."
+            value={newTitle}
+            onChange={(e) => setNewTitle(e.target.value)}
+            className="note-input"
+          />
+          <button type="submit" className="create-btn">
+            Create Note
+          </button>
+        </form>
 
-      <form onSubmit={handleCreateNote} className="create-note-form">
-        <input
-          type="text"
-          placeholder="New note title..."
-          value={newTitle}
-          onChange={(e) => setNewTitle(e.target.value)}
-          className="note-input"
-        />
-        <button type="submit" className="create-btn">
-          Create Note
-        </button>
-      </form>
-
-      <div className="notes-list">
-        {notes.length === 0 ? (
-          <p className="no-notes">No notes yet. Create one to get started!</p>
-        ) : (
-          notes.map((note) => (
-            <div
-              key={note.id}
-              className="note-item"
-              onClick={() => navigate(`/notes/${note.id}`)}
-            >
-              <h3>{note.title}</h3>
-              <p className="note-date">
-                Updated: {new Date(note.updated_at).toLocaleDateString()}
-              </p>
-            </div>
-          ))
-        )}
+        <div className="notes-list">
+          {notes.length === 0 ? (
+            <p className="no-notes">No notes yet. Create one to get started!</p>
+          ) : (
+            notes.map((note) => (
+              <div
+                key={note.id}
+                className="note-item"
+                onClick={() => navigate(`/notes/${note.id}`)}
+              >
+                <div className="note-content">
+                  <h3>{note.title}</h3>
+                  <p className="note-date">
+                    Updated: {new Date(note.updated_at).toLocaleDateString()}
+                  </p>
+                </div>
+                <button
+                  className="delete-btn"
+                  onClick={(e) => handleDeleteNote(e, note.id)}
+                  title="Delete note"
+                >
+                  ✕
+                </button>
+              </div>
+            ))
+          )}
+        </div>
       </div>
     </div>
   );

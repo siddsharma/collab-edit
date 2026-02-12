@@ -26,8 +26,8 @@ function App() {
     <Router>
       <Routes>
         <Route path="/" element={user ? <Navigate to="/notes" /> : <Login />} />
-        <Route path="/notes" element={user ? <NoteList /> : <Navigate to="/" />} />
-        <Route path="/notes/:noteId" element={user ? <Editor /> : <Navigate to="/" />} />
+        <Route path="/notes" element={user ? <NoteList user={user} /> : <Navigate to="/" />} />
+        <Route path="/notes/:noteId" element={user ? <Editor user={user} /> : <Navigate to="/" />} />
       </Routes>
     </Router>
   );

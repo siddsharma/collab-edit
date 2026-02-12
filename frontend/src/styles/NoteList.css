@@ -1,37 +1,17 @@
-.notes-container {
-  max-width: 900px;
-  margin: 0 auto;
-  padding: 30px 20px;
+.notes-page {
+  display: flex;
+  flex-direction: column;
   min-height: 100vh;
   background-color: var(--bg-light);
 }
 
-.header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 30px;
-}
-
-.header h1 {
-  font-size: 28px;
-  color: var(--primary-color);
-}
-
-.signout-btn {
-  padding: 10px 20px;
-  background-color: #ef4444;
-  color: white;
-  border: none;
-  border-radius: 5px;
-  font-size: 14px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: background-color 0.3s ease;
-}
-
-.signout-btn:hover {
-  background-color: #dc2626;
+.notes-container {
+  flex: 1;
+  max-width: 900px;
+  margin: 0 auto;
+  padding: 30px 20px;
+  width: 100%;
+  background-color: var(--bg-light);
 }
 
 .create-note-form {
@@ -83,6 +63,10 @@
   cursor: pointer;
   transition: all 0.3s ease;
   border-left: 4px solid var(--primary-color);
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
 }
 
 .note-item:hover {
@@ -90,15 +74,48 @@
   transform: translateY(-4px);
 }
 
+.note-content {
+  flex: 1;
+  min-width: 0;
+}
+
 .note-item h3 {
   color: var(--primary-color);
   margin-bottom: 10px;
   font-size: 18px;
+  word-break: break-word;
 }
 
 .note-date {
   color: var(--text-secondary);
   font-size: 12px;
+}
+
+.delete-btn {
+  background: #fee2e2;
+  border: none;
+  color: #dc2626;
+  width: 32px;
+  height: 32px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 18px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s ease;
+  flex-shrink: 0;
+}
+
+.delete-btn:hover {
+  background: #fca5a5;
+  color: #991b1b;
+  transform: scale(1.1);
+}
+
+.delete-btn:active {
+  transform: scale(0.95);
 }
 
 .no-notes {

@@ -4,12 +4,15 @@ import { auth } from "../firebaseConfig";
 import { useEditor, EditorContent } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import { io } from "socket.io-client";
+import axios from "axios";
+import { Header } from "./Header";
 import { ActiveUsers } from "./ActiveUsers";
 import "../styles/Editor.css";
 
 const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || "http://localhost:8000";
+const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
 
-export function Editor() {
+export function Editor({ user }) {
   const { noteId } = useParams();
   const navigate = useNavigate();
   const [activeUsers, setActiveUsers] = useState([]);
@@ -18,6 +21,24 @@ export function Editor() {
   const [connected, setConnected] = useState(false);
   const [isReady, setIsReady] = useState(false);
   const initializingRef = useRef(false);
+  const [noteName, setNoteName] = useState("");
+  const [noteLoading, setNoteLoading] = useState(true);
+
+  // Fetch note details to get the title
+  useEffect(() => {
+    const fetchNoteDetails = async () => {
+      try {
+        const response = await axios.get(`${API_URL}/notes/${noteId}`);
+        setNoteName(response.data.title);
+        setNoteLoading(false);
+      } catch (error) {
+        console.error("Error fetching note details:", error);
+        setNoteLoading(false);
+      }
+    };
+
+    fetchNoteDetails();
+  }, [noteId]);
 
   const editor = useEditor({
     extensions: [StarterKit],
@@ -163,22 +184,21 @@ export function Editor() {
   }
 
   return (
-    <div className="editor-container">
-      <div className="editor-header">
-        <button onClick={() => navigate("/notes")} className="back-btn">
-          ← Back
-        </button>
-        <div className="status">
+    <div className="editor-page">
+      <Header user={user} noteName={noteName} showBack={true} onBack={() => navigate("/notes")} />
+
+      <div className="editor-container">
+        <div className="editor-status">
           <span className={`status-indicator ${connected ? "connected" : "disconnected"}`}>
             {connected ? "Connected" : "Disconnected"}
           </span>
         </div>
-      </div>
 
-      <ActiveUsers users={activeUsers} />
+        <ActiveUsers users={activeUsers} />
 
-      <div className="editor-wrapper">
-        <EditorContent editor={editor} className="editor" />
+        <div className="editor-wrapper">
+          <EditorContent editor={editor} className="editor" />
+        </div>
       </div>
     </div>
   );

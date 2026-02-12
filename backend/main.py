@@ -118,6 +118,22 @@ async def get_note(note_id: str, db: Session = Depends(get_db)):
         "updated_at": note.updated_at,
     }
 
+@app.delete("/notes/{note_id}")
+async def delete_note(note_id: str, db: Session = Depends(get_db)):
+    """Delete a specific note"""
+    note = db.query(Note).filter(Note.id == note_id).first()
+    if not note:
+        raise HTTPException(status_code=404, detail="Note not found")
+    
+    # Delete associated versions
+    db.query(NoteVersion).filter(NoteVersion.note_id == note_id).delete()
+    
+    # Delete the note
+    db.delete(note)
+    db.commit()
+    
+    return {"message": "Note deleted successfully"}
+
 # Socket.IO Event Handlers
 @sio.event
 async def connect(sid, *args, **kwargs):
