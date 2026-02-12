@@ -1,0 +1,152 @@
+.editor-container {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  background-color: white;
+}
+
+.editor-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 15px 20px;
+  border-bottom: 1px solid var(--border-color);
+  background-color: var(--bg-light);
+}
+
+.back-btn {
+  padding: 8px 16px;
+  background-color: var(--primary-color);
+  color: white;
+  border: none;
+  border-radius: 4px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 0.3s ease;
+}
+
+.back-btn:hover {
+  background-color: var(--primary-hover);
+}
+
+.status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.status-indicator {
+  font-size: 12px;
+  font-weight: 600;
+  padding: 6px 12px;
+  border-radius: 20px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.status-indicator.connected {
+  background-color: #d1fae5;
+  color: #065f46;
+}
+
+.status-indicator.connected::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  background-color: #10b981;
+  border-radius: 50%;
+}
+
+.status-indicator.disconnected {
+  background-color: #fee2e2;
+  color: #7f1d1d;
+}
+
+.status-indicator.disconnected::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  background-color: #ef4444;
+  border-radius: 50%;
+}
+
+.editor-wrapper {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px;
+}
+
+.editor {
+  max-width: 900px;
+  margin: 0 auto;
+  min-height: 500px;
+  padding: 20px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: white;
+  line-height: 1.6;
+}
+
+.editor > div {
+  outline: none;
+}
+
+/* TipTap editor styles */
+.editor h1 {
+  font-size: 28px;
+  font-weight: 700;
+  margin: 0.67em 0;
+}
+
+.editor h2 {
+  font-size: 22px;
+  font-weight: 700;
+  margin: 0.75em 0;
+}
+
+.editor h3 {
+  font-size: 18px;
+  font-weight: 700;
+  margin: 0.83em 0;
+}
+
+.editor p {
+  margin: 0.5em 0;
+}
+
+.editor ul,
+.editor ol {
+  margin: 0.5em 0;
+  padding-left: 20px;
+}
+
+.editor blockquote {
+  margin: 0.5em 0;
+  padding-left: 15px;
+  border-left: 4px solid var(--primary-color);
+  color: var(--text-secondary);
+}
+
+.editor code {
+  background-color: var(--bg-light);
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-family: 'Courier New', monospace;
+  font-size: 14px;
+}
+
+.editor pre {
+  background-color: #2d2d2d;
+  color: #f8f8f2;
+  padding: 12px;
+  border-radius: 5px;
+  overflow-x: auto;
+  margin: 0.5em 0;
+}
+
+.editor a {
+  color: var(--primary-color);
+  text-decoration: underline;
+}
