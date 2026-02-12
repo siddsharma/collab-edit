@@ -9,6 +9,9 @@ venv/
 *.egg-info/
 dist/
 build/
+.pytest_cache/
+.coverage
+htmlcov/
 
 # Node
 node_modules/
@@ -19,17 +22,43 @@ dist/
 # Sensitive files
 firebase-key.json
 .env
-.env.local
+.env.production
+.env.staging
+secrets/
+*.pem
+*.key
 
 # IDE
 .vscode/
 .idea/
 *.swp
 *.swo
+.DS_Store
+*.iml
 
 # Docker
 .docker/
+.dockerignore
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
 
 # OS
 .DS_Store
 Thumbs.db
+*.exe
+*.dll
+
+# Testing
+.pytest_cache/
+*.coverage
+coverage/
+
+# Backup files
+*.backup
+*.bak
+*~
