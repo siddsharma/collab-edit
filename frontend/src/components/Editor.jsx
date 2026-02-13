@@ -355,6 +355,7 @@ export function Editor({ user }) {
     content: "<p></p>",
     editable: true,
     onCreate: ({ editor }) => {
+      editor.setEditable(true);
       console.log("Editor created, editable:", editor.isEditable);
     },
     onUpdate: () => {
@@ -434,6 +435,7 @@ export function Editor({ user }) {
           }
 
           setIsReady(true);
+          editor.setEditable(true);
           console.log("Editor is ready");
         }
       });
@@ -588,6 +590,13 @@ export function Editor({ user }) {
       window.removeEventListener("pagehide", onPageHide);
     };
   }, [socket, connected, isReady, noteId, ydoc]);
+
+  useEffect(() => {
+    if (!editor) return;
+    if (connected && isReady && !editor.isEditable) {
+      editor.setEditable(true);
+    }
+  }, [editor, connected, isReady]);
 
   const openVersionHistory = async () => {
     try {
