@@ -3,7 +3,13 @@ import { auth } from "../firebaseConfig";
 import { useNavigate } from "react-router-dom";
 import "../styles/Header.css";
 
-export function Header({ user, noteName, showBack = false, onBack = null }) {
+export function Header({
+  user,
+  noteName,
+  showBack = false,
+  onBack = null,
+  onVersionHistory = null,
+}) {
   const navigate = useNavigate();
 
   const handleSignOut = async () => {
@@ -43,6 +49,11 @@ export function Header({ user, noteName, showBack = false, onBack = null }) {
       </div>
 
       <div className="header-right">
+        {onVersionHistory && (
+          <button onClick={onVersionHistory} className="back-btn">
+            Version History
+          </button>
+        )}
         <div className="user-info">
           <span className="user-email">{user?.email || "User"}</span>
         </div>

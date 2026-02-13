@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field, validator
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from datetime import datetime
 
 
@@ -52,6 +52,30 @@ class NoteVersionResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class NoteVersionListItem(BaseModel):
+    """Schema for note version list item"""
+    id: str
+    note_id: str
+    user_id: str
+    kind: str
+    timestamp: datetime
+
+
+class NoteVersionSnapshotResponse(BaseModel):
+    """Schema for version snapshot response"""
+    note_id: str
+    version_id: str
+    version_timestamp: datetime
+    yjs_updates: List[str]
+
+
+class NoteRestoreResponse(BaseModel):
+    """Schema for restore response"""
+    note_id: str
+    restored_from_version_id: str
+    restored_at: datetime
 
 
 class ErrorResponse(BaseModel):

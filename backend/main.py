@@ -2,7 +2,7 @@ import os
 import json
 import logging
 from datetime import datetime
-from typing import Dict, List, Set
+from typing import Dict, List, Set, Any
 from fastapi import FastAPI, Depends, HTTPException, status, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -19,7 +19,17 @@ from slowapi.errors import RateLimitExceeded
 from db import engine, SessionLocal, Base, Note, NoteVersion
 from config import settings
 from logging_config import setup_logging
-from models import NoteCreate, NoteUpdate, NoteResponse, NoteListResponse, ErrorResponse, HealthResponse
+from models import (
+    NoteCreate,
+    NoteUpdate,
+    NoteResponse,
+    NoteListResponse,
+    NoteVersionListItem,
+    NoteVersionSnapshotResponse,
+    NoteRestoreResponse,
+    ErrorResponse,
+    HealthResponse,
+)
 
 # Setup logging
 logger = setup_logging()
@@ -284,6 +294,175 @@ async def delete_note(request: Request, note_id: str, db: Session = Depends(get_
             detail="Failed to delete note"
         )
 
+
+def _parse_version_delta(delta_raw: str) -> Dict[str, Any]:
+    try:
+        payload = json.loads(delta_raw)
+        if isinstance(payload, dict):
+            return payload
+    except (json.JSONDecodeError, TypeError, ValueError):
+        pass
+    return {}
+
+
+@app.get(
+    "/notes/{note_id}/versions",
+    response_model=List[NoteVersionListItem],
+    tags=["Notes"],
+    summary="List note versions",
+)
+@limiter.limit("30/minute")
+async def list_note_versions(request: Request, note_id: str, limit: int = 100, db: Session = Depends(get_db)):
+    """List recent versions for a note."""
+    try:
+        note = db.query(Note).filter(Note.id == note_id).first()
+        if not note:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Note not found")
+
+        safe_limit = max(1, min(limit, 500))
+        versions = (
+            db.query(NoteVersion)
+            .filter(NoteVersion.note_id == note_id)
+            .order_by(NoteVersion.timestamp.desc())
+            .limit(safe_limit)
+            .all()
+        )
+
+        response_items = []
+        for version in versions:
+            payload = _parse_version_delta(version.delta)
+            response_items.append(
+                NoteVersionListItem(
+                    id=version.id,
+                    note_id=version.note_id,
+                    user_id=version.user_id,
+                    kind=str(payload.get("kind") or "unknown"),
+                    timestamp=version.timestamp,
+                )
+            )
+        return response_items
+    except HTTPException:
+        raise
+    except SQLAlchemyError as e:
+        logger.error(f"Database error listing versions for note {note_id}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to list note versions",
+        )
+
+
+@app.get(
+    "/notes/{note_id}/versions/{version_id}",
+    response_model=NoteVersionSnapshotResponse,
+    tags=["Notes"],
+    summary="Get note snapshot at a specific version",
+)
+@limiter.limit("30/minute")
+async def get_note_version_snapshot(
+    request: Request,
+    note_id: str,
+    version_id: str,
+    db: Session = Depends(get_db),
+):
+    """Return all Yjs updates required to reconstruct a note at version timestamp."""
+    try:
+        note = db.query(Note).filter(Note.id == note_id).first()
+        if not note:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Note not found")
+
+        target_version = (
+            db.query(NoteVersion)
+            .filter(NoteVersion.note_id == note_id, NoteVersion.id == version_id)
+            .first()
+        )
+        if not target_version:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Version not found")
+
+        prior_versions = (
+            db.query(NoteVersion)
+            .filter(
+                NoteVersion.note_id == note_id,
+                NoteVersion.timestamp <= target_version.timestamp,
+            )
+            .order_by(NoteVersion.timestamp.asc())
+            .all()
+        )
+
+        yjs_updates: List[str] = []
+        for version in prior_versions:
+            payload = _parse_version_delta(version.delta)
+            if payload.get("kind") == "yjs_update" and payload.get("update"):
+                yjs_updates.append(str(payload["update"]))
+
+        return NoteVersionSnapshotResponse(
+            note_id=note_id,
+            version_id=target_version.id,
+            version_timestamp=target_version.timestamp,
+            yjs_updates=yjs_updates,
+        )
+    except HTTPException:
+        raise
+    except SQLAlchemyError as e:
+        logger.error(f"Database error loading version snapshot {version_id} for note {note_id}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to load version snapshot",
+        )
+
+
+@app.post(
+    "/notes/{note_id}/versions/{version_id}/restore",
+    response_model=NoteRestoreResponse,
+    tags=["Notes"],
+    summary="Mark a note as restored from a specific version",
+)
+@limiter.limit("20/minute")
+async def restore_note_version(
+    request: Request,
+    note_id: str,
+    version_id: str,
+    db: Session = Depends(get_db),
+):
+    """Record a restore action for note history/audit."""
+    try:
+        note = db.query(Note).filter(Note.id == note_id).first()
+        if not note:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Note not found")
+
+        target_version = (
+            db.query(NoteVersion)
+            .filter(NoteVersion.note_id == note_id, NoteVersion.id == version_id)
+            .first()
+        )
+        if not target_version:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Version not found")
+
+        restored_at = datetime.utcnow()
+        restore_event = NoteVersion(
+            note_id=note_id,
+            user_id="system",
+            delta=json.dumps({"kind": "restore", "target_version_id": version_id}),
+            timestamp=restored_at,
+        )
+        note.updated_at = restored_at
+        db.add(restore_event)
+        db.commit()
+
+        return NoteRestoreResponse(
+            note_id=note_id,
+            restored_from_version_id=version_id,
+            restored_at=restored_at,
+        )
+    except HTTPException:
+        raise
+    except SQLAlchemyError as e:
+        db.rollback()
+        logger.error(f"Database error restoring version {version_id} for note {note_id}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to restore note version",
+        )
+
 # Socket.IO Event Handlers
 @sio.event
 async def connect(sid, *args, **kwargs):
@@ -338,12 +517,26 @@ async def join_note(sid, data):
                     except (json.JSONDecodeError, ValueError) as e:
                         logger.warning(f"JSON parse error for note {note_id}: {e}")
 
+                # Replay all persisted incremental Yjs updates for this note.
+                # We currently do not materialize Yjs state into notes.content snapshots.
+                # Filtering by note.updated_at can drop updates and cause data loss on reload.
+                updates_query = db.query(NoteVersion).filter(NoteVersion.note_id == note_id)
+                yjs_updates = []
+                for version in updates_query.order_by(NoteVersion.timestamp.asc()).all():
+                    try:
+                        payload = json.loads(version.delta)
+                        if isinstance(payload, dict) and payload.get("kind") == "yjs_update" and payload.get("update"):
+                            yjs_updates.append(payload["update"])
+                    except (json.JSONDecodeError, TypeError, ValueError):
+                        continue
+
                 # Build user_names mapping
                 user_names = {uid: user_emails.get(uid, uid) for uid in active_users[note_id]}
                 await sio.emit(
                     "load_note",
                     {
                         "content": content,
+                        "yjs_updates": yjs_updates,
                         "title": note.title,
                         "active_users": list(active_users[note_id]),
                         "user_names": user_names,
@@ -375,36 +568,79 @@ async def join_note(sid, data):
         await sio.emit("error", {"message": str(e)}, to=sid)
 
 @sio.event
-async def update_note(sid, data):
-    """Handle note updates"""
+async def yjs_update(sid, data):
+    """Relay incremental Yjs updates to other clients in the same note room."""
     try:
-        if not data or "delta" not in data:
-            logger.warning(f"Invalid update_note request from {sid}")
+        if not data or "update" not in data:
+            logger.warning(f"Invalid yjs_update request from {sid}")
             return
-        
+
         note_id = data.get("note_id") or sid_to_note.get(sid)
-        delta = data.get("delta")
+        update_payload = data.get("update")
 
         if not note_id:
-            logger.warning(f"Missing note_id for update from {sid}")
+            logger.warning(f"Missing note_id for yjs_update from {sid}")
             await sio.emit("error", {"message": "Missing note_id"}, to=sid)
             return
 
-        if not isinstance(delta, dict):
-            logger.warning(f"Invalid delta format from {sid}")
-            await sio.emit("error", {"message": "Invalid note update payload"}, to=sid)
+        if not isinstance(update_payload, str) or not update_payload:
+            logger.warning(f"Invalid yjs update payload from {sid}")
+            await sio.emit("error", {"message": "Invalid yjs update payload"}, to=sid)
             return
 
-        # Realtime fan-out only; persistence is handled by debounced HTTP autosave.
+        # Persist incremental update for replay until next snapshot autosave.
+        db = SessionLocal()
+        try:
+            note = db.query(Note).filter(Note.id == note_id).first()
+            if not note:
+                logger.warning(f"Note not found for yjs_update: {note_id}")
+                await sio.emit("error", {"message": "Note not found"}, to=sid)
+                return
+
+            delta_payload = json.dumps({"kind": "yjs_update", "update": update_payload})
+            last_version = (
+                db.query(NoteVersion)
+                .filter(NoteVersion.note_id == note_id)
+                .order_by(NoteVersion.timestamp.desc())
+                .first()
+            )
+
+            # Skip duplicate consecutive updates to limit replay-log bloat.
+            if last_version and last_version.delta == delta_payload:
+                await sio.emit(
+                    "yjs_update",
+                    {"note_id": note_id, "update": update_payload},
+                    room=f"note_{note_id}",
+                    skip_sid=sid,
+                )
+                logger.debug(f"Relayed duplicate Yjs update without persisting for note {note_id}")
+                return
+
+            version = NoteVersion(
+                note_id=note_id,
+                user_id=sid_to_user.get(sid, "unknown"),
+                delta=delta_payload,
+                timestamp=datetime.utcnow(),
+            )
+            db.add(version)
+            db.commit()
+        except SQLAlchemyError as e:
+            db.rollback()
+            logger.error(f"Database error persisting yjs_update for {note_id}: {e}")
+            await sio.emit("error", {"message": "Failed to persist yjs update"}, to=sid)
+            return
+        finally:
+            db.close()
+
         await sio.emit(
-            "note_updated",
-            {"note_id": note_id, "content": delta},
+            "yjs_update",
+            {"note_id": note_id, "update": update_payload},
             room=f"note_{note_id}",
             skip_sid=sid,
         )
-        logger.debug(f"Realtime note update relayed for note {note_id} from {sid}")
+        logger.debug(f"Relayed Yjs update for note {note_id} from {sid}")
     except Exception as e:
-        logger.error(f"Error in update_note: {e}")
+        logger.error(f"Error in yjs_update: {e}")
 
 @sio.event
 async def disconnect(sid):

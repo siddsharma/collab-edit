@@ -1,13 +1,15 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { auth } from "../firebaseConfig";
 import { useEditor, EditorContent } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
+import Collaboration from "@tiptap/extension-collaboration";
 import Underline from "@tiptap/extension-underline";
 import TextAlign from "@tiptap/extension-text-align";
 import Highlight from "@tiptap/extension-highlight";
 import { io } from "socket.io-client";
 import axios from "axios";
+import * as Y from "yjs";
 import { Header } from "./Header";
 import { ActiveUsers } from "./ActiveUsers";
 import "../styles/Editor.css";
@@ -181,8 +183,82 @@ function Toolbar({ editor }) {
 
 const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || "http://localhost:8000";
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
-const SAVE_DEBOUNCE_MS = 1500;
-const SAVE_MAX_INTERVAL_MS = 10000;
+const YJS_SEND_DEBOUNCE_MS = 250;
+const YJS_SEND_MAX_INTERVAL_MS = 1000;
+
+function uint8ToBase64(bytes) {
+  let binary = "";
+  const chunkSize = 0x8000;
+
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+  }
+
+  return btoa(binary);
+}
+
+function base64ToUint8(base64) {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
+
+function VersionPreview({ yjsUpdates, onContentReady }) {
+  const snapshotDoc = useMemo(() => {
+    const doc = new Y.Doc();
+    if (Array.isArray(yjsUpdates)) {
+      for (const encodedUpdate of yjsUpdates) {
+        try {
+          Y.applyUpdate(doc, base64ToUint8(encodedUpdate), "history");
+        } catch (error) {
+          console.error("Failed to apply history update:", error);
+        }
+      }
+    }
+    return doc;
+  }, [yjsUpdates]);
+
+  useEffect(() => {
+    return () => {
+      snapshotDoc.destroy();
+    };
+  }, [snapshotDoc]);
+
+  const previewEditor = useEditor({
+    editable: false,
+    extensions: [
+      StarterKit.configure({
+        history: false,
+      }),
+      Collaboration.configure({
+        document: snapshotDoc,
+        field: "default",
+      }),
+      Underline,
+      TextAlign.configure({
+        types: ["heading", "paragraph"],
+      }),
+      Highlight.configure({
+        multicolor: false,
+      }),
+    ],
+    content: "<p></p>",
+  });
+
+  if (!previewEditor) {
+    return <p>Loading version preview...</p>;
+  }
+
+  useEffect(() => {
+    if (!previewEditor || !onContentReady) return;
+    onContentReady(previewEditor.getJSON());
+  }, [previewEditor, yjsUpdates, onContentReady]);
+
+  return <EditorContent editor={previewEditor} className="editor version-preview-editor" />;
+}
 
 export function Editor({ user }) {
   const { noteId } = useParams();
@@ -195,10 +271,41 @@ export function Editor({ user }) {
   const initializingRef = useRef(false);
   const [noteName, setNoteName] = useState("");
   const [noteLoading, setNoteLoading] = useState(true);
-  const saveTimerRef = useRef(null);
-  const latestContentRef = useRef(null);
-  const lastSavedContentRef = useRef("");
-  const lastSaveAtRef = useRef(Date.now());
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [versions, setVersions] = useState([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState("");
+  const [selectedVersionId, setSelectedVersionId] = useState("");
+  const [selectedVersionTimestamp, setSelectedVersionTimestamp] = useState("");
+  const [selectedVersionUpdates, setSelectedVersionUpdates] = useState([]);
+  const [selectedVersionContent, setSelectedVersionContent] = useState(null);
+  const [selectedVersionLoading, setSelectedVersionLoading] = useState(false);
+  const [restoreLoading, setRestoreLoading] = useState(false);
+  const pendingLocalUpdatesRef = useRef([]);
+  const flushTimerRef = useRef(null);
+  const maxFlushTimerRef = useRef(null);
+  const initializedFromSnapshotRef = useRef(false);
+  const skipNextUpdateRef = useRef(false);
+  const didBootstrapSyncRef = useRef(false);
+  const ydoc = useMemo(() => new Y.Doc(), [noteId]);
+
+  useEffect(() => {
+    initializedFromSnapshotRef.current = false;
+    didBootstrapSyncRef.current = false;
+    setHistoryOpen(false);
+    setVersions([]);
+    setHistoryError("");
+    setSelectedVersionId("");
+    setSelectedVersionTimestamp("");
+    setSelectedVersionUpdates([]);
+    setSelectedVersionContent(null);
+  }, [noteId]);
+
+  useEffect(() => {
+    return () => {
+      ydoc.destroy();
+    };
+  }, [ydoc]);
 
   // Fetch note details to get the title
   useEffect(() => {
@@ -216,49 +323,15 @@ export function Editor({ user }) {
     fetchNoteDetails();
   }, [noteId]);
 
-  const saveNote = useCallback(
-    async ({ keepalive = false, reason = "autosave" } = {}) => {
-      if (!noteId || !latestContentRef.current) return;
-
-      const nextSerialized = JSON.stringify(latestContentRef.current);
-      if (nextSerialized === lastSavedContentRef.current) return;
-
-      const payload = JSON.stringify({ content: latestContentRef.current });
-      const url = `${API_URL}/notes/${noteId}`;
-
-      try {
-        if (keepalive) {
-          fetch(url, {
-            method: "PUT",
-            headers: { "Content-Type": "application/json" },
-            body: payload,
-            keepalive: true,
-          });
-          return;
-        }
-
-        await axios.put(url, { content: latestContentRef.current });
-        lastSavedContentRef.current = nextSerialized;
-        lastSaveAtRef.current = Date.now();
-      } catch (error) {
-        console.error(`Error saving note (${reason}):`, error);
-      }
-    },
-    [noteId]
-  );
-
-  const scheduleAutosave = useCallback(() => {
-    if (saveTimerRef.current) {
-      clearTimeout(saveTimerRef.current);
-    }
-    saveTimerRef.current = setTimeout(() => {
-      void saveNote({ reason: "debounce" });
-    }, SAVE_DEBOUNCE_MS);
-  }, [saveNote]);
-
   const editor = useEditor({
     extensions: [
-      StarterKit,
+      StarterKit.configure({
+        history: false,
+      }),
+      Collaboration.configure({
+        document: ydoc,
+        field: "default",
+      }),
       Underline,
       TextAlign.configure({
         types: ["heading", "paragraph"],
@@ -272,18 +345,11 @@ export function Editor({ user }) {
     onCreate: ({ editor }) => {
       console.log("Editor created, editable:", editor.isEditable);
     },
-    onUpdate: ({ editor }) => {
-      const content = editor.getJSON();
-      latestContentRef.current = content;
-      console.log("Editor updated, socket:", !!socket, "connected:", connected, "isReady:", isReady);
-      if (socket && connected && isReady) {
-        console.log("Sending update to backend");
-        socket.emit("update_note", {
-          note_id: noteId,
-          delta: content,
-        });
+    onUpdate: () => {
+      if (skipNextUpdateRef.current) {
+        skipNextUpdateRef.current = false;
+        return;
       }
-      scheduleAutosave();
     },
   });
 
@@ -314,12 +380,33 @@ export function Editor({ user }) {
         console.log("Raw active_users:", data.active_users);
         console.log("User names mapping:", data.user_names);
         if (editor) {
-          // Set content or default to empty if not provided
-          const content = data.content || { type: "doc", content: [{ type: "paragraph" }] };
-          editor.commands.setContent(content);
-          latestContentRef.current = content;
-          lastSavedContentRef.current = JSON.stringify(content);
-          lastSaveAtRef.current = Date.now();
+          if (!initializedFromSnapshotRef.current) {
+            const content = data.content || { type: "doc", content: [{ type: "paragraph" }] };
+            skipNextUpdateRef.current = true;
+            editor.commands.setContent(content);
+            initializedFromSnapshotRef.current = true;
+          }
+
+          if (Array.isArray(data.yjs_updates) && data.yjs_updates.length > 0) {
+            for (const encodedUpdate of data.yjs_updates) {
+              try {
+                const updateBytes = base64ToUint8(encodedUpdate);
+                skipNextUpdateRef.current = true;
+                Y.applyUpdate(ydoc, updateBytes, "remote");
+              } catch (error) {
+                console.error("Failed to apply replayed Yjs update:", error);
+              }
+            }
+          }
+
+          if (!didBootstrapSyncRef.current) {
+            const fullStateUpdate = Y.encodeStateAsUpdate(ydoc);
+            newSocket.emit("yjs_update", {
+              note_id: noteId,
+              update: uint8ToBase64(fullStateUpdate),
+            });
+            didBootstrapSyncRef.current = true;
+          }
 
           // Set active users if provided (deduplicate by user ID)
           if (data.active_users) {
@@ -336,6 +423,18 @@ export function Editor({ user }) {
 
           setIsReady(true);
           console.log("Editor is ready");
+        }
+      });
+
+      newSocket.on("yjs_update", (data) => {
+        if (!data?.update) return;
+
+        try {
+          const updateBytes = base64ToUint8(data.update);
+          skipNextUpdateRef.current = true;
+          Y.applyUpdate(ydoc, updateBytes, "remote");
+        } catch (error) {
+          console.error("Failed to apply Yjs update:", error);
         }
       });
 
@@ -371,19 +470,6 @@ export function Editor({ user }) {
         );
       });
 
-      newSocket.on("note_updated", (data) => {
-        console.log("Received remote update:", data);
-        if (data.content && editor) {
-          const currentJSON = JSON.stringify(editor.getJSON());
-          const newJSON = JSON.stringify(data.content);
-
-          if (currentJSON !== newJSON) {
-            editor.commands.setContent(data.content);
-            latestContentRef.current = data.content;
-          }
-        }
-      });
-
       newSocket.on("disconnect", () => {
         console.log("Disconnected from server");
         setConnected(false);
@@ -410,49 +496,150 @@ export function Editor({ user }) {
       }
       initializingRef.current = false;
     };
-  }, [noteId]); // Only reinitialize when noteId changes
+  }, [noteId, editor, ydoc]); // Only reinitialize when note/editor changes
 
   useEffect(() => {
-    if (!editor || !isReady) return;
+    if (!socket || !connected || !isReady) return;
 
-    const interval = setInterval(() => {
-      const hasUnsaved =
-        latestContentRef.current &&
-        JSON.stringify(latestContentRef.current) !== lastSavedContentRef.current;
-      const staleSave = Date.now() - lastSaveAtRef.current >= SAVE_MAX_INTERVAL_MS;
-
-      if (hasUnsaved && staleSave) {
-        void saveNote({ reason: "checkpoint" });
+    const clearFlushTimers = () => {
+      if (flushTimerRef.current) {
+        clearTimeout(flushTimerRef.current);
+        flushTimerRef.current = null;
       }
-    }, 1000);
+      if (maxFlushTimerRef.current) {
+        clearTimeout(maxFlushTimerRef.current);
+        maxFlushTimerRef.current = null;
+      }
+    };
 
-    return () => clearInterval(interval);
-  }, [editor, isReady, saveNote]);
+    const flushQueuedUpdates = () => {
+      if (!pendingLocalUpdatesRef.current.length) return;
+      if (!socket.connected) return;
 
-  useEffect(() => {
-    const flush = () => {
-      void saveNote({ keepalive: true, reason: "lifecycle" });
+      let merged;
+      try {
+        merged = Y.mergeUpdates(pendingLocalUpdatesRef.current);
+      } catch (error) {
+        console.error("Failed to merge Yjs updates:", error);
+        pendingLocalUpdatesRef.current = [];
+        clearFlushTimers();
+        return;
+      }
+
+      pendingLocalUpdatesRef.current = [];
+      clearFlushTimers();
+      socket.emit("yjs_update", {
+        note_id: noteId,
+        update: uint8ToBase64(merged),
+      });
+    };
+
+    const scheduleFlush = () => {
+      if (flushTimerRef.current) {
+        clearTimeout(flushTimerRef.current);
+      }
+      flushTimerRef.current = setTimeout(flushQueuedUpdates, YJS_SEND_DEBOUNCE_MS);
+
+      if (!maxFlushTimerRef.current) {
+        maxFlushTimerRef.current = setTimeout(flushQueuedUpdates, YJS_SEND_MAX_INTERVAL_MS);
+      }
+    };
+
+    const onYjsUpdate = (update, origin) => {
+      if (origin === "remote") return;
+      pendingLocalUpdatesRef.current.push(update);
+      scheduleFlush();
     };
 
     const onVisibilityChange = () => {
       if (document.visibilityState === "hidden") {
-        flush();
+        flushQueuedUpdates();
       }
     };
 
-    window.addEventListener("pagehide", flush);
-    window.addEventListener("beforeunload", flush);
+    const onPageHide = () => {
+      flushQueuedUpdates();
+    };
+
+    ydoc.on("update", onYjsUpdate);
     document.addEventListener("visibilitychange", onVisibilityChange);
+    window.addEventListener("pagehide", onPageHide);
+    if (pendingLocalUpdatesRef.current.length > 0) {
+      scheduleFlush();
+    }
 
     return () => {
-      window.removeEventListener("pagehide", flush);
-      window.removeEventListener("beforeunload", flush);
+      flushQueuedUpdates();
+      clearFlushTimers();
+      ydoc.off("update", onYjsUpdate);
       document.removeEventListener("visibilitychange", onVisibilityChange);
-      if (saveTimerRef.current) {
-        clearTimeout(saveTimerRef.current);
-      }
+      window.removeEventListener("pagehide", onPageHide);
     };
-  }, [saveNote]);
+  }, [socket, connected, isReady, noteId, ydoc]);
+
+  const openVersionHistory = async () => {
+    try {
+      setHistoryOpen(true);
+      setHistoryLoading(true);
+      setHistoryError("");
+
+      const response = await axios.get(`${API_URL}/notes/${noteId}/versions`, {
+        params: { limit: 200 },
+      });
+      const fetchedVersions = Array.isArray(response.data) ? response.data : [];
+      setVersions(fetchedVersions);
+
+      if (fetchedVersions.length > 0) {
+        const firstVersionId = fetchedVersions[0].id;
+        await loadVersionSnapshot(firstVersionId);
+      } else {
+        setSelectedVersionId("");
+        setSelectedVersionTimestamp("");
+        setSelectedVersionUpdates([]);
+        setSelectedVersionContent(null);
+      }
+    } catch (error) {
+      console.error("Failed to load version history:", error);
+      setHistoryError("Failed to load version history.");
+    } finally {
+      setHistoryLoading(false);
+    }
+  };
+
+  const loadVersionSnapshot = async (versionId) => {
+    if (!versionId) return;
+    try {
+      setSelectedVersionLoading(true);
+      setSelectedVersionId(versionId);
+
+      const response = await axios.get(`${API_URL}/notes/${noteId}/versions/${versionId}`);
+      setSelectedVersionUpdates(Array.isArray(response.data?.yjs_updates) ? response.data.yjs_updates : []);
+      setSelectedVersionTimestamp(response.data?.version_timestamp || "");
+    } catch (error) {
+      console.error("Failed to load version snapshot:", error);
+      setHistoryError("Failed to load selected version.");
+    } finally {
+      setSelectedVersionLoading(false);
+    }
+  };
+
+  const restoreSelectedVersion = async () => {
+    if (!selectedVersionId || !selectedVersionContent || !editor) return;
+    try {
+      setRestoreLoading(true);
+      setHistoryError("");
+
+      await axios.post(`${API_URL}/notes/${noteId}/versions/${selectedVersionId}/restore`);
+
+      editor.commands.setContent(selectedVersionContent);
+      setHistoryOpen(false);
+    } catch (error) {
+      console.error("Failed to restore version:", error);
+      setHistoryError("Failed to restore selected version.");
+    } finally {
+      setRestoreLoading(false);
+    }
+  };
 
   if (!editor) {
     return <div className="editor-container"><p>Loading editor...</p></div>;
@@ -460,7 +647,13 @@ export function Editor({ user }) {
 
   return (
     <div className="editor-page">
-      <Header user={user} noteName={noteName} showBack={true} onBack={() => navigate("/notes")} />
+      <Header
+        user={user}
+        noteName={noteName}
+        showBack={true}
+        onBack={() => navigate("/notes")}
+        onVersionHistory={openVersionHistory}
+      />
 
       <div className="editor-container">
         <div className="editor-status">
@@ -477,6 +670,73 @@ export function Editor({ user }) {
           <EditorContent editor={editor} className="editor" />
         </div>
       </div>
+
+      {historyOpen && (
+        <div className="version-history-overlay">
+          <div className="version-history-modal">
+            <div className="version-history-header">
+              <h3>Version History</h3>
+              <div className="version-history-actions">
+                <button
+                  className="toolbar-button"
+                  onClick={restoreSelectedVersion}
+                  disabled={!selectedVersionId || !selectedVersionContent || selectedVersionLoading || restoreLoading}
+                >
+                  {restoreLoading ? "Restoring..." : "Restore this version"}
+                </button>
+                <button
+                  className="toolbar-button"
+                  onClick={() => setHistoryOpen(false)}
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+
+            {historyError && <p className="version-history-error">{historyError}</p>}
+
+            <div className="version-history-body">
+              <div className="version-history-list">
+                {historyLoading ? (
+                  <p>Loading versions...</p>
+                ) : (
+                  versions.map((version) => (
+                    <button
+                      key={version.id}
+                      className={`version-item ${selectedVersionId === version.id ? "active" : ""}`}
+                      onClick={() => loadVersionSnapshot(version.id)}
+                    >
+                      <span>{new Date(version.timestamp).toLocaleString()}</span>
+                      <span>{version.user_id}</span>
+                    </button>
+                  ))
+                )}
+                {!historyLoading && versions.length === 0 && (
+                  <p>No versions found for this note.</p>
+                )}
+              </div>
+
+              <div className="version-history-preview">
+                {selectedVersionLoading ? (
+                  <p>Loading snapshot...</p>
+                ) : selectedVersionId ? (
+                  <>
+                    <p className="version-selected-time">
+                      Snapshot: {selectedVersionTimestamp ? new Date(selectedVersionTimestamp).toLocaleString() : ""}
+                    </p>
+                    <VersionPreview
+                      yjsUpdates={selectedVersionUpdates}
+                      onContentReady={setSelectedVersionContent}
+                    />
+                  </>
+                ) : (
+                  <p>Select a version to preview.</p>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
