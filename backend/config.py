@@ -65,12 +65,6 @@ class Settings(BaseSettings):
             raise ValueError(f'Log level must be one of {valid_levels}')
         return v.upper()
 
-    @validator('allowed_origins', pre=True)
-    def parse_origins(cls, v):
-        if isinstance(v, str):
-            return [origin.strip() for origin in v.split(',')]
-        return v
-
     def get_cors_origins(self) -> list:
         """Get CORS origins list"""
         if isinstance(self.allowed_origins, str):

@@ -12,6 +12,9 @@
     "@tiptap/react": "^2.1.13",
     "@tiptap/starter-kit": "^2.1.13",
     "@tiptap/extension-collaboration": "^2.1.13",
+    "@tiptap/extension-underline": "^2.1.13",
+    "@tiptap/extension-text-align": "^2.1.13",
+    "@tiptap/extension-highlight": "^2.1.13",
     "y-websocket": "^1.5.0",
     "yjs": "^13.6.8",
     "axios": "^1.6.5"

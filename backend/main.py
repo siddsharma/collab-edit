@@ -3,7 +3,7 @@ import json
 import logging
 from datetime import datetime
 from typing import Dict, List, Set
-from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi import FastAPI, Depends, HTTPException, status, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
@@ -95,6 +95,8 @@ sio = socketio.AsyncServer(
 # Track active users per note
 active_users: Dict[str, Set[str]] = {}
 user_emails: Dict[str, str] = {}
+sid_to_note: Dict[str, str] = {}
+sid_to_user: Dict[str, str] = {}
 
 # CORS
 app.add_middleware(
@@ -141,7 +143,7 @@ async def readiness(db: Session = Depends(get_db)):
 # API v1 routes
 @app.post("/notes", response_model=NoteResponse, status_code=status.HTTP_201_CREATED, tags=["Notes"], summary="Create a new note")
 @limiter.limit("10/minute")
-async def create_note(note: NoteCreate, db: Session = Depends(get_db)):
+async def create_note(request: Request, note: NoteCreate, db: Session = Depends(get_db)):
     """Create a new note"""
     try:
         logger.info(f"Creating note with title: {note.title}")
@@ -173,7 +175,7 @@ async def create_note(note: NoteCreate, db: Session = Depends(get_db)):
 
 @app.get("/notes", response_model=List[NoteListResponse], tags=["Notes"], summary="List all notes")
 @limiter.limit("30/minute")
-async def list_notes(db: Session = Depends(get_db)):
+async def list_notes(request: Request, db: Session = Depends(get_db)):
     """List all notes"""
     try:
         logger.info("Listing all notes")
@@ -195,7 +197,7 @@ async def list_notes(db: Session = Depends(get_db)):
 
 @app.get("/notes/{note_id}", response_model=NoteResponse, tags=["Notes"], summary="Get a specific note")
 @limiter.limit("30/minute")
-async def get_note(note_id: str, db: Session = Depends(get_db)):
+async def get_note(request: Request, note_id: str, db: Session = Depends(get_db)):
     """Get a specific note"""
     try:
         logger.info(f"Retrieving note: {note_id}")
@@ -213,7 +215,7 @@ async def get_note(note_id: str, db: Session = Depends(get_db)):
 
 @app.put("/notes/{note_id}", response_model=NoteResponse, tags=["Notes"], summary="Update a note")
 @limiter.limit("20/minute")
-async def update_note(note_id: str, note_data: NoteUpdate, db: Session = Depends(get_db)):
+async def update_note(request: Request, note_id: str, note_data: NoteUpdate, db: Session = Depends(get_db)):
     """Update a note"""
     try:
         logger.info(f"Updating note: {note_id}")
@@ -222,14 +224,29 @@ async def update_note(note_id: str, note_data: NoteUpdate, db: Session = Depends
             logger.warning(f"Note not found for update: {note_id}")
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Note not found")
         
-        if note_data.title:
+        changed = False
+
+        if note_data.title is not None and note_data.title != note.title:
             note.title = note_data.title
-        if note_data.content:
-            note.content = json.dumps(note_data.content)
-        
-        note.updated_at = datetime.utcnow()
-        db.commit()
-        db.refresh(note)
+            changed = True
+
+        if note_data.content is not None:
+            current_content = None
+            if note.content and note.content.strip():
+                try:
+                    current_content = json.loads(note.content)
+                except (json.JSONDecodeError, ValueError):
+                    current_content = note.content
+
+            if current_content != note_data.content:
+                note.content = json.dumps(note_data.content)
+                changed = True
+
+        if changed:
+            note.updated_at = datetime.utcnow()
+            db.commit()
+            db.refresh(note)
+
         logger.info(f"Note updated successfully: {note_id}")
         return note
     except SQLAlchemyError as e:
@@ -242,7 +259,7 @@ async def update_note(note_id: str, note_data: NoteUpdate, db: Session = Depends
 
 @app.delete("/notes/{note_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["Notes"], summary="Delete a note")
 @limiter.limit("10/minute")
-async def delete_note(note_id: str, db: Session = Depends(get_db)):
+async def delete_note(request: Request, note_id: str, db: Session = Depends(get_db)):
     """Delete a specific note"""
     try:
         logger.info(f"Deleting note: {note_id}")
@@ -305,6 +322,8 @@ async def join_note(sid, data):
         
         active_users[note_id].add(user_id)
         user_emails[user_id] = user_email
+        sid_to_note[sid] = note_id
+        sid_to_user[sid] = user_id
         
         # Get the note content
         db = SessionLocal()
@@ -363,16 +382,27 @@ async def update_note(sid, data):
             logger.warning(f"Invalid update_note request from {sid}")
             return
         
-        # Note: You should track which note this sid is in
-        # For now, we'll need to look it up or pass it in the request
-        db = SessionLocal()
-        try:
-            # Get all notes to find which one this user is editing
-            # This is a simplified approach; in production, track sid -> note_id
-            delta = data.get("delta")
-            logger.debug(f"Note update received from {sid}")
-        finally:
-            db.close()
+        note_id = data.get("note_id") or sid_to_note.get(sid)
+        delta = data.get("delta")
+
+        if not note_id:
+            logger.warning(f"Missing note_id for update from {sid}")
+            await sio.emit("error", {"message": "Missing note_id"}, to=sid)
+            return
+
+        if not isinstance(delta, dict):
+            logger.warning(f"Invalid delta format from {sid}")
+            await sio.emit("error", {"message": "Invalid note update payload"}, to=sid)
+            return
+
+        # Realtime fan-out only; persistence is handled by debounced HTTP autosave.
+        await sio.emit(
+            "note_updated",
+            {"note_id": note_id, "content": delta},
+            room=f"note_{note_id}",
+            skip_sid=sid,
+        )
+        logger.debug(f"Realtime note update relayed for note {note_id} from {sid}")
     except Exception as e:
         logger.error(f"Error in update_note: {e}")
 
@@ -381,12 +411,26 @@ async def disconnect(sid):
     """Handle client disconnection"""
     try:
         logger.info(f"Client disconnected: {sid}")
-        # Cleanup logic here
+        note_id = sid_to_note.pop(sid, None)
+        user_id = sid_to_user.pop(sid, None)
+
+        if note_id and user_id and note_id in active_users:
+            active_users[note_id].discard(user_id)
+            if not active_users[note_id]:
+                del active_users[note_id]
+            else:
+                user_names = {uid: user_emails.get(uid, uid) for uid in active_users[note_id]}
+                await sio.emit(
+                    "user_left",
+                    {
+                        "user_id": user_id,
+                        "active_users": list(active_users[note_id]),
+                        "user_names": user_names,
+                    },
+                    room=f"note_{note_id}",
+                )
     except Exception as e:
         logger.error(f"Error in disconnect: {e}")
-
-# Wrap FastAPI app with Socket.IO
-app = ASGIApp(sio, app)
 
 # Global exception handler
 @app.exception_handler(HTTPException)
@@ -396,6 +440,9 @@ async def http_exception_handler(request, exc):
         status_code=exc.status_code,
         content={"detail": exc.detail, "status_code": exc.status_code},
     )
+
+# Wrap FastAPI app with Socket.IO
+app = ASGIApp(sio, app)
 
 if __name__ == "__main__":
     import uvicorn

@@ -31,9 +31,9 @@ export function NoteList({ user }) {
     if (!newTitle.trim()) return;
 
     try {
-      const response = await axios.post(
-        `${API_URL}/notes?title=${encodeURIComponent(newTitle)}`
-      );
+      const response = await axios.post(`${API_URL}/notes`, {
+        title: newTitle.trim(),
+      });
       setNewTitle("");
       setNotes([...notes, response.data]);
       navigate(`/notes/${response.data.id}`);
