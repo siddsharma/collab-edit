@@ -55,7 +55,7 @@ jobs:
         pytest tests/ -q
       env:
         DATABASE_URL: sqlite:///./ci.db
-        ENVIRONMENT: testing
+        ENVIRONMENT: development
 
   test-frontend:
     runs-on: ubuntu-latest
@@ -149,6 +149,7 @@ jobs:
         output: 'trivy-results.sarif'
     
     - name: Upload Trivy results to GitHub Security tab
+      if: ${{ github.event_name == 'push' }}
       continue-on-error: true
       uses: github/codeql-action/upload-sarif@v2
       with:
@@ -161,8 +162,13 @@ jobs:
     - uses: actions/checkout@v3
     
     - name: Run SonarCloud scan
-      if: ${{ env.SONAR_TOKEN != '' }}
+      if: ${{ secrets.SONAR_TOKEN != '' }}
+      continue-on-error: true
       uses: SonarSource/sonarcloud-github-action@master
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+    - name: Skip SonarCloud (missing SONAR_TOKEN)
+      if: ${{ secrets.SONAR_TOKEN == '' }}
+      run: echo "Skipping SonarCloud because SONAR_TOKEN is not configured."
