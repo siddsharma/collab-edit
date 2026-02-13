@@ -59,6 +59,7 @@ class NoteVersionListItem(BaseModel):
     id: str
     note_id: str
     user_id: str
+    user_name: Optional[str] = None
     kind: str
     timestamp: datetime
 
@@ -76,6 +77,12 @@ class NoteRestoreResponse(BaseModel):
     note_id: str
     restored_from_version_id: str
     restored_at: datetime
+
+
+class NoteRestoreRequest(BaseModel):
+    """Schema for restore request actor metadata"""
+    user_id: Optional[str] = None
+    user_name: Optional[str] = None
 
 
 class ErrorResponse(BaseModel):

@@ -27,6 +27,7 @@ from models import (
     NoteVersionListItem,
     NoteVersionSnapshotResponse,
     NoteRestoreResponse,
+    NoteRestoreRequest,
     ErrorResponse,
     HealthResponse,
 )
@@ -305,6 +306,33 @@ def _parse_version_delta(delta_raw: str) -> Dict[str, Any]:
     return {}
 
 
+def _get_note_or_404(db: Session, note_id: str) -> Note:
+    note = db.query(Note).filter(Note.id == note_id).first()
+    if not note:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Note not found")
+    return note
+
+
+def _get_note_version_or_404(db: Session, note_id: str, version_id: str) -> NoteVersion:
+    version = (
+        db.query(NoteVersion)
+        .filter(NoteVersion.note_id == note_id, NoteVersion.id == version_id)
+        .first()
+    )
+    if not version:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Version not found")
+    return version
+
+
+def _extract_yjs_updates(versions: List[NoteVersion]) -> List[str]:
+    updates: List[str] = []
+    for version in versions:
+        payload = _parse_version_delta(version.delta)
+        if payload.get("kind") == "yjs_update" and payload.get("update"):
+            updates.append(str(payload["update"]))
+    return updates
+
+
 @app.get(
     "/notes/{note_id}/versions",
     response_model=List[NoteVersionListItem],
@@ -315,9 +343,7 @@ def _parse_version_delta(delta_raw: str) -> Dict[str, Any]:
 async def list_note_versions(request: Request, note_id: str, limit: int = 100, db: Session = Depends(get_db)):
     """List recent versions for a note."""
     try:
-        note = db.query(Note).filter(Note.id == note_id).first()
-        if not note:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Note not found")
+        _get_note_or_404(db, note_id)
 
         safe_limit = max(1, min(limit, 500))
         versions = (
@@ -336,6 +362,7 @@ async def list_note_versions(request: Request, note_id: str, limit: int = 100, d
                     id=version.id,
                     note_id=version.note_id,
                     user_id=version.user_id,
+                    user_name=str(payload.get("user_name") or version.user_id),
                     kind=str(payload.get("kind") or "unknown"),
                     timestamp=version.timestamp,
                 )
@@ -366,17 +393,8 @@ async def get_note_version_snapshot(
 ):
     """Return all Yjs updates required to reconstruct a note at version timestamp."""
     try:
-        note = db.query(Note).filter(Note.id == note_id).first()
-        if not note:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Note not found")
-
-        target_version = (
-            db.query(NoteVersion)
-            .filter(NoteVersion.note_id == note_id, NoteVersion.id == version_id)
-            .first()
-        )
-        if not target_version:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Version not found")
+        _get_note_or_404(db, note_id)
+        target_version = _get_note_version_or_404(db, note_id, version_id)
 
         prior_versions = (
             db.query(NoteVersion)
@@ -388,11 +406,7 @@ async def get_note_version_snapshot(
             .all()
         )
 
-        yjs_updates: List[str] = []
-        for version in prior_versions:
-            payload = _parse_version_delta(version.delta)
-            if payload.get("kind") == "yjs_update" and payload.get("update"):
-                yjs_updates.append(str(payload["update"]))
+        yjs_updates = _extract_yjs_updates(prior_versions)
 
         return NoteVersionSnapshotResponse(
             note_id=note_id,
@@ -421,27 +435,27 @@ async def restore_note_version(
     request: Request,
     note_id: str,
     version_id: str,
+    restore_data: NoteRestoreRequest,
     db: Session = Depends(get_db),
 ):
     """Record a restore action for note history/audit."""
     try:
-        note = db.query(Note).filter(Note.id == note_id).first()
-        if not note:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Note not found")
-
-        target_version = (
-            db.query(NoteVersion)
-            .filter(NoteVersion.note_id == note_id, NoteVersion.id == version_id)
-            .first()
-        )
-        if not target_version:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Version not found")
+        note = _get_note_or_404(db, note_id)
+        _get_note_version_or_404(db, note_id, version_id)
 
         restored_at = datetime.utcnow()
+        restore_user_id = restore_data.user_id or "system"
+        restore_user_name = restore_data.user_name or restore_user_id
         restore_event = NoteVersion(
             note_id=note_id,
-            user_id="system",
-            delta=json.dumps({"kind": "restore", "target_version_id": version_id}),
+            user_id=restore_user_id,
+            delta=json.dumps(
+                {
+                    "kind": "restore",
+                    "target_version_id": version_id,
+                    "user_name": restore_user_name,
+                }
+            ),
             timestamp=restored_at,
         )
         note.updated_at = restored_at
@@ -521,14 +535,9 @@ async def join_note(sid, data):
                 # We currently do not materialize Yjs state into notes.content snapshots.
                 # Filtering by note.updated_at can drop updates and cause data loss on reload.
                 updates_query = db.query(NoteVersion).filter(NoteVersion.note_id == note_id)
-                yjs_updates = []
-                for version in updates_query.order_by(NoteVersion.timestamp.asc()).all():
-                    try:
-                        payload = json.loads(version.delta)
-                        if isinstance(payload, dict) and payload.get("kind") == "yjs_update" and payload.get("update"):
-                            yjs_updates.append(payload["update"])
-                    except (json.JSONDecodeError, TypeError, ValueError):
-                        continue
+                yjs_updates = _extract_yjs_updates(
+                    updates_query.order_by(NoteVersion.timestamp.asc()).all()
+                )
 
                 # Build user_names mapping
                 user_names = {uid: user_emails.get(uid, uid) for uid in active_users[note_id]}
@@ -597,7 +606,11 @@ async def yjs_update(sid, data):
                 await sio.emit("error", {"message": "Note not found"}, to=sid)
                 return
 
-            delta_payload = json.dumps({"kind": "yjs_update", "update": update_payload})
+            user_id = sid_to_user.get(sid, "unknown")
+            user_name = user_emails.get(user_id, user_id)
+            delta_payload = json.dumps(
+                {"kind": "yjs_update", "update": update_payload, "user_name": user_name}
+            )
             last_version = (
                 db.query(NoteVersion)
                 .filter(NoteVersion.note_id == note_id)
@@ -618,7 +631,7 @@ async def yjs_update(sid, data):
 
             version = NoteVersion(
                 note_id=note_id,
-                user_id=sid_to_user.get(sid, "unknown"),
+                user_id=user_id,
                 delta=delta_payload,
                 timestamp=datetime.utcnow(),
             )
@@ -678,7 +691,8 @@ async def http_exception_handler(request, exc):
     )
 
 # Wrap FastAPI app with Socket.IO
-app = ASGIApp(sio, app)
+fastapi_app = app
+app = ASGIApp(sio, fastapi_app)
 
 if __name__ == "__main__":
     import uvicorn

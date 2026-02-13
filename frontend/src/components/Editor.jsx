@@ -183,8 +183,20 @@ function Toolbar({ editor }) {
 
 const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || "http://localhost:8000";
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
-const YJS_SEND_DEBOUNCE_MS = 250;
-const YJS_SEND_MAX_INTERVAL_MS = 1000;
+
+function parseMsEnv(value, fallback) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return fallback;
+  }
+  return parsed;
+}
+
+const YJS_SEND_DEBOUNCE_MS = parseMsEnv(import.meta.env.VITE_YJS_SEND_DEBOUNCE_MS, 1000);
+const YJS_SEND_MAX_INTERVAL_MS = Math.max(
+  YJS_SEND_DEBOUNCE_MS,
+  parseMsEnv(import.meta.env.VITE_YJS_SEND_MAX_INTERVAL_MS, 5000)
+);
 
 function uint8ToBase64(bytes) {
   let binary = "";
@@ -629,7 +641,10 @@ export function Editor({ user }) {
       setRestoreLoading(true);
       setHistoryError("");
 
-      await axios.post(`${API_URL}/notes/${noteId}/versions/${selectedVersionId}/restore`);
+      await axios.post(`${API_URL}/notes/${noteId}/versions/${selectedVersionId}/restore`, {
+        user_id: user?.uid || null,
+        user_name: user?.email || user?.displayName || user?.uid || null,
+      });
 
       editor.commands.setContent(selectedVersionContent);
       setHistoryOpen(false);
@@ -707,7 +722,7 @@ export function Editor({ user }) {
                       onClick={() => loadVersionSnapshot(version.id)}
                     >
                       <span>{new Date(version.timestamp).toLocaleString()}</span>
-                      <span>{version.user_id}</span>
+                      <span>{version.user_name || version.user_id}</span>
                     </button>
                   ))
                 )}
